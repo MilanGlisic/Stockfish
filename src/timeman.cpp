@@ -1,161 +1,243 @@
-/*
-  Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
-  Copyright (C) 2008-2013 Marco Costalba, Joona Kiiski, Tord Romstad
-
-  Stockfish is free software: you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 3 of the License, or
-  (at your option) any later version.
-
-  Stockfish is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 #include <algorithm>
 #include <cmath>
-
 #include "search.h"
 #include "timeman.h"
 #include "ucioption.h"
 
-namespace {
+static sint64 SEND;
+static sint64 TIME_MAX, INCREMENT;
+static int DEPTH;
+static bool HALT;
+static bool total_moves;
+static sint64 total_time_white, total_time_black;
+static int movestogo_old = 0;
 
-  /// Constants
+void search_halt( int tr )
+    {
+    HALT = TRUE;
 
-  const int MoveHorizon  = 50;    // Plan time management at most this many moves ahead
-  const double MaxRatio   = 7.0;  // When in trouble, we can step over reserved time with this ratio
-  const double StealRatio = 0.33; // However we must not steal time from remaining moves over this ratio
+    if( jump_ok )
+        longjmp(J, 1);
+    }
 
+void notify( sint64 x )
+    {
+    uint64 t, u, nps, NODES = move_white_number + move_black_number + move_null_number;
 
-  // MoveImportance[] is based on naive statistical analysis of "how many games are still undecided
-  // after n half-moves". Game is considered "undecided" as long as neither side has >275cp advantage.
-  // Data was extracted from CCRL game database with some simple filtering criteria.
-  const int MoveImportance[512] = {
-    7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780, 7780,
-    7780, 7780, 7780, 7780, 7778, 7778, 7776, 7776, 7776, 7773, 7770, 7768, 7766, 7763, 7757, 7751,
-    7743, 7735, 7724, 7713, 7696, 7689, 7670, 7656, 7627, 7605, 7571, 7549, 7522, 7493, 7462, 7425,
-    7385, 7350, 7308, 7272, 7230, 7180, 7139, 7094, 7055, 7010, 6959, 6902, 6841, 6778, 6705, 6651,
-    6569, 6508, 6435, 6378, 6323, 6253, 6152, 6085, 5995, 5931, 5859, 5794, 5717, 5646, 5544, 5462,
-    5364, 5282, 5172, 5078, 4988, 4901, 4831, 4764, 4688, 4609, 4536, 4443, 4365, 4293, 4225, 4155,
-    4085, 4005, 3927, 3844, 3765, 3693, 3634, 3560, 3479, 3404, 3331, 3268, 3207, 3146, 3077, 3011,
-    2947, 2894, 2828, 2776, 2727, 2676, 2626, 2589, 2538, 2490, 2442, 2394, 2345, 2302, 2243, 2192,
-    2156, 2115, 2078, 2043, 2004, 1967, 1922, 1893, 1845, 1809, 1772, 1736, 1702, 1674, 1640, 1605,
-    1566, 1536, 1509, 1479, 1452, 1423, 1388, 1362, 1332, 1304, 1289, 1266, 1250, 1228, 1206, 1180,
-    1160, 1134, 1118, 1100, 1080, 1068, 1051, 1034, 1012, 1001, 980, 960, 945, 934, 916, 900, 888,
-    878, 865, 852, 828, 807, 787, 770, 753, 744, 731, 722, 706, 700, 683, 676, 671, 664, 652, 641,
-    634, 627, 613, 604, 591, 582, 568, 560, 552, 540, 534, 529, 519, 509, 495, 484, 474, 467, 460,
-    450, 438, 427, 419, 410, 406, 399, 394, 387, 382, 377, 372, 366, 359, 353, 348, 343, 337, 333,
-    328, 321, 315, 309, 303, 298, 293, 287, 284, 281, 277, 273, 265, 261, 255, 251, 247, 241, 240,
-    235, 229, 218, 217, 213, 212, 208, 206, 197, 193, 191, 189, 185, 184, 180, 177, 172, 170, 170,
-    170, 166, 163, 159, 158, 156, 155, 151, 146, 141, 138, 136, 132, 130, 128, 125, 123, 122, 118,
-    118, 118, 117, 115, 114, 108, 107, 105, 105, 105, 102, 97, 97, 95, 94, 93, 91, 88, 86, 83, 80,
-    80, 79, 79, 79, 78, 76, 75, 72, 72, 71, 70, 68, 65, 63, 61, 61, 59, 59, 59, 58, 56, 55, 54, 54,
-    52, 49, 48, 48, 48, 48, 45, 45, 45, 44, 43, 41, 41, 41, 41, 40, 40, 38, 37, 36, 34, 34, 34, 33,
-    31, 29, 29, 29, 28, 28, 28, 28, 28, 28, 28, 27, 27, 27, 27, 27, 24, 24, 23, 23, 22, 21, 20, 20,
-    19, 19, 19, 19, 19, 18, 18, 18, 18, 17, 17, 17, 17, 17, 16, 16, 15, 15, 14, 14, 14, 12, 12, 11,
-    9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 2, 2, 2, 2,
-    2, 1, 1, 1, 1, 1, 1, 1 };
+	t = x / 1000;
 
-  int move_importance(int ply) { return MoveImportance[std::min(ply, 511)]; }
+	if( t == 0 )
+		nps = 0;
+	else
+		nps = NODES / t;
+	u = process_clock() - MOMENT;
+    printf("info time %I64u nodes %I64u nps %I64u cpuload %u\n", t, NODES, nps * 1000,
+        (unsigned)((double)u / (double)((x - SEND) * numCPU) * 1000));
+	fflush(stdout);
 
+	SEND = x;
+	MOMENT += u;
+	}
 
-  /// Function Prototypes
+static sint64 TIME_BATTLE, TIME_EASY, TIME_ORDINARY;
 
-  enum TimeType { OptimumTime, MaxTime };
+void resolve_term( int d )
+    {
+    sint64 x, y;
 
-  template<TimeType>
-  int remaining(int myTime, int movesToGo, int fullMoveNumber, int slowMover);
-}
+    if( !jump_ok )
+        return;
 
+	x = clock_() - CLOCK;
+	y = clock_() - CLOCK_UCI;
+	node_count = node_frequency;
 
-void TimeManager::pv_instability(double bestMoveChanges) {
+	if( PONDERING )
+		x = -1000000;
 
-  unstablePVExtraTime = int(bestMoveChanges * optimumSearchTime / 1.4);
-}
+    if( d == DEPTH )
+        search_halt(1);
 
+    if( y - SEND > 1000000 )
+        notify(y);
 
-void TimeManager::init(const Search::LimitsType& limits, int currentPly, Color us)
-{
-  /* We support four different kind of time controls:
+    if( x > TIME_MAX )
+        search_halt(1);
 
-      increment == 0 && movesToGo == 0 means: x basetime  [sudden death!]
-      increment == 0 && movesToGo != 0 means: x moves in y minutes
-      increment >  0 && movesToGo == 0 means: x basetime + z increment
-      increment >  0 && movesToGo != 0 means: x moves in y minutes + z increment
+    if( d >= 0 && d < 8 )
+        goto END;
 
-    Time management is adjusted by following UCI parameters:
+    if( !MOVE_BAD && x >= TIME_BATTLE )
+        search_halt(2);
 
-      emergencyMoveHorizon: Be prepared to always play at least this many moves
-      emergencyBaseTime   : Always attempt to keep at least this much time (in ms) at clock
-      emergencyMoveTime   : Plus attempt to keep at least this much time for each remaining emergency move
-      minThinkingTime     : No matter what, use at least this much thinking before doing the move
-  */
+    if( EASY && x >= TIME_EASY )
+        search_halt(3);
 
-  int hypMTG, hypMyTime, t1, t2;
+    if( !MOVE_BATTLE && x >= TIME_ORDINARY && !MOVE_BAD )
+        search_halt(4);
+    END:
+    while( question_input() )
+        input_console();
+    }
 
-  // Read uci parameters
-  int emergencyMoveHorizon = Options["Emergency Move Horizon"];
-  int emergencyBaseTime    = Options["Emergency Base Time"];
-  int emergencyMoveTime    = Options["Emergency Move Time"];
-  int minThinkingTime      = Options["Minimum Thinking Time"];
-  int slowMover            = Options["Slow Mover"];
+#define Infinite 0xfffffffffffffff
+#define STRTOK(p) p = strtok (NULL, " ")
 
-  // Initialize to maximum values but unstablePVExtraTime that is reset
-  unstablePVExtraTime = 0;
-  optimumSearchTime = maximumSearchTime = limits.time[us];
+void search_initialization( char *str )
+    {
+    char *p;
+    sint64 time_white = Infinite, time_black = Infinite, TIME, TOTAL_TIME;
+	int inc_white = 0, inc_black = 0, movestogo = 0;
+	int PTF = 0;
+	
+    DEPTH = 255;
+    TIME_MAX = TIME_DESIRED = Infinite;
+    HALT = FALSE;
+    FIRST_TIME = TRUE;
+    PONDERING = FALSE;
+	time_factor = 1.0;
+    SEND = 0;
+    node_count = node_frequency = 4096;
+    p = strtok(str, " ");
 
-  // We calculate optimum time usage for different hypothetic "moves to go"-values and choose the
-  // minimum of calculated search time values. Usually the greatest hypMTG gives the minimum values.
-  for (hypMTG = 1; hypMTG <= (limits.movestogo ? std::min(limits.movestogo, MoveHorizon) : MoveHorizon); ++hypMTG)
-  {
-      // Calculate thinking time for hypothetic "moves to go"-value
-      hypMyTime =  limits.time[us]
-                 + limits.inc[us] * (hypMTG - 1)
-                 - emergencyBaseTime
-                 - emergencyMoveTime * std::min(hypMTG, emergencyMoveHorizon);
+    for ( STRTOK(p); p != NULL; STRTOK(p) )
+        {
+        if( !strcmp(p, "depth") )
+            {
+            STRTOK(p);
+            DEPTH = MAXIMUM(1, atoi(p));
+            }
+        else if( !strcmp(p, "movetime") )
+            {
+            STRTOK(p);
+            TIME_MAX = MAXIMUM(1, _atoi64(p)) * 1000 - 10000;
+            }
+        else if( !strcmp(p, "wtime") )
+            {
+            STRTOK(p);
+            time_white = _atoi64(p) * 1000;
+            }
+        else if( !strcmp(p, "winc") )
+            {
+            STRTOK(p);
+            inc_white = atoi(p) * 1000;
+            }
+        else if( !strcmp(p, "btime") )
+            {
+            STRTOK(p);
+            time_black = _atoi64(p) * 1000;
+            }
+        else if( !strcmp(p, "binc") )
+            {
+            STRTOK(p);
+            inc_black = atoi(p) * 1000;
+            }
+        else if( !strcmp(p, "movestogo") )
+            {
+            STRTOK(p);
+            movestogo = _atoi64(p);
+            }
+        else if( !strcmp(p, "ponder") && PONDER )
+            {
+            PONDERING = TRUE;
+            continue;
+            }
 
-      hypMyTime = std::max(hypMyTime, 0);
+        else if( !strcmp(p, "infinite") )
+            continue;
 
-      t1 = minThinkingTime + remaining<OptimumTime>(hypMyTime, hypMTG, currentPly, slowMover);
-      t2 = minThinkingTime + remaining<MaxTime>(hypMyTime, hypMTG, currentPly, slowMover);
+        else
+            ERROR_("go string: %s", p);
+        }
 
-      optimumSearchTime = std::min(optimumSearchTime, t1);
-      maximumSearchTime = std::min(maximumSearchTime, t2);
-  }
+     if (PONDER)
+        if( MPH == 3 )
+            PTF = 6;
+        else if( MPH == 2 )
+            PTF = 4;
 
-  if (Options["Ponder"])
-      optimumSearchTime += optimumSearchTime / 4;
+    TIME_BATTLE = Infinite;
+    TIME_ORDINARY = Infinite;
+    TIME_EASY = Infinite;
 
-  // Make sure that maxSearchTime is not over absoluteMaxSearchTime
-  optimumSearchTime = std::min(optimumSearchTime, maximumSearchTime);
-}
+    TIME = POSITION.white_en_move ? time_white : time_black;
 
+    if( TIME == Infinite )
+        goto END;
 
-namespace {
+	INCREMENT = POSITION.white_en_move ? inc_white : inc_black;
+    if (INCREMENT < 0)
+        INCREMENT = 0;
 
-  template<TimeType T>
-  int remaining(int myTime, int movesToGo, int currentPly, int slowMover)
-  {
-    const double TMaxRatio   = (T == OptimumTime ? 1 : MaxRatio);
-    const double TStealRatio = (T == OptimumTime ? 0 : StealRatio);
+    TIME = MAXIMUM(TIME - 500000, 9 * TIME / 10);
+    if (TIME < 0)
+        TIME = 0;
 
-    double thisMoveImportance = double(move_importance(currentPly) * slowMover) / 100;
-    int otherMovesImportance = 0;
+	if( GAME_NEW || movestogo > movestogo_old)
+        {
+        total_moves = movestogo;
+        total_time_white = MAXIMUM(time_white - 500000, 95 * time_white / 100);
+		total_time_black = MAXIMUM(time_black - 500000, 95 * time_black / 100);
+        }
+    TOTAL_TIME = POSITION.white_en_move ? total_time_white : total_time_black;
 
-    for (int i = 1; i < movesToGo; ++i)
-        otherMovesImportance += move_importance(currentPly + 2 * i);
+    if( movestogo )
+        {
+        time_factor = (float)(TIME * total_moves) / (float)(TOTAL_TIME * movestogo);
+		movestogo_old = movestogo;
 
-    double ratio1 = (TMaxRatio * thisMoveImportance) / (TMaxRatio * thisMoveImportance + otherMovesImportance);
-    double ratio2 = (thisMoveImportance + TStealRatio * otherMovesImportance) / (thisMoveImportance + otherMovesImportance);
+        if ( time_factor < 1 )
+            TIME_DESIRED = TIME / movestogo + INCREMENT;
+		else
+            TIME_DESIRED = MINIMUM(TIME * time_factor * time_factor / movestogo + INCREMENT, TIME);
 
-    return int(floor(myTime * std::min(ratio1, ratio2)));
-  }
-}
+        if( time_factor < 1.2 && movestogo > 2 )
+            TIME_MAX = MINIMUM(TIME * time_factor * (movestogo + 2) / (movestogo * 3), 6 * TIME_DESIRED);
+        else
+            TIME_MAX = TIME * (movestogo + 1) / (movestogo * 2);
+		
+		if( TIME_MAX < 10000 )
+            TIME_MAX = 10000;      
+    }
+    else
+        {
+        if( (TIME / 20) > INCREMENT )
+		    {
+            TIME_DESIRED = TIME / (((40 - PTF) * TIME / 20 - INCREMENT * 12) / (TIME / 20)) + INCREMENT;
+            TIME_MAX = TIME / ((5 * TIME / 20 - INCREMENT * 3) / (TIME / 20));
+            }
+        else
+            {
+            TIME_DESIRED = (TIME / (28 - PTF)) + INCREMENT;
+            TIME_MAX = TIME / 2;
+            }
+
+        if (TIME < 500000)
+            {
+            TIME_DESIRED = 5000;
+            TIME_MAX = 10000;
+            }
+        else if (TIME < 1000000 && INCREMENT < 500000)
+            {
+            TIME_DESIRED = TIME / 80;
+            TIME_MAX = TIME / 20;
+            }
+        else if (TIME < 2000000 && INCREMENT < 500000)
+            {
+            TIME_MAX = TIME / 10;
+            }
+        } 
+
+	if( TIME_DESIRED < 5000 )
+        TIME_DESIRED = 5000;
+
+    TIME_EASY = TIME_DESIRED / 4;
+    TIME_BATTLE = TIME_DESIRED;
+    TIME_ORDINARY = (3 * TIME_DESIRED) / 4;
+
+    END:
+    if( TIME == Infinite )
+        ANALYSIS = TRUE;
+    else
+        ANALYSIS = FALSE;
+    }
